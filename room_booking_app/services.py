@@ -11,10 +11,10 @@ def timing_validation(start_time, end_time):
     now = timezone.now()
 
     if start_time <= now:
-        raise HttpResponseBadRequest("Start time must be in the future.")
+        raise ValueError("Start time must be in the future.")
 
     if end_time <= start_time:
-        raise HttpResponseBadRequest("End time must be after start time.")
+        raise ValueError("End time must be after start time.")
 
 
 # critical section - must  enforce mutual exclusion

@@ -5,6 +5,24 @@ from django.utils import timezone
 from django.contrib.auth.base_user import AbstractBaseUser, BaseUserManager
 from django.contrib.auth.models import PermissionsMixin
 
+from django.contrib.postgres.constraints import ExclusionConstraint
+from django.contrib.postgres.fields import (
+    RangeBoundary,
+    RangeOperators,
+    DateTimeRangeField,
+)
+from django.contrib.postgres.operations import BtreeGistExtension
+from django.db.models import Func, Q
+
+
+def get_expiration_time():
+    return timezone.now() + timedelta(minutes=10)
+
+
+class TsTzRange(Func):
+    function = "TSTZRANGE"
+    output_field = DateTimeRangeField()
+
 
 class UserManager(BaseUserManager):
     def create_user(self, email, password=None, **extra_fields):
@@ -52,16 +70,20 @@ class Room(models.Model):
     def get_schedule(self):
         now = timezone.now()
 
-        bookings = Booking.objects.filter(
-            room=self,
-            booking_status__in=[
-                Booking.Status.PENDING,
-                Booking.Status.CONFIRMED,
-            ],
-        ).filter(
-            models.Q(booking_status=Booking.Status.CONFIRMED)
-            | models.Q(expires_at__gt=now)
-        ).order_by("start_time")
+        bookings = (
+            Booking.objects.filter(
+                room=self,
+                booking_status__in=[
+                    Booking.Status.PENDING,
+                    Booking.Status.CONFIRMED,
+                ],
+            )
+            .filter(
+                models.Q(booking_status=Booking.Status.CONFIRMED)
+                | models.Q(expires_at__gt=now)
+            )
+            .order_by("start_time")
+        )
 
         for booking in bookings:
             yield {
@@ -81,6 +103,22 @@ class Booking(models.Model):
         CONFIRMED = "CONFIRMED", "Confirmed"
         EXPIRED = "EXPIRED", "Expired"
         CANCELLED = "CANCELLED", "Cancelled"
+
+    class Meta:
+        constraints = [
+            # enforces mutual exclusion
+            ExclusionConstraint(
+                name="no_overlapping_active_room_booking_requests",
+                expressions=[
+                    (
+                        TsTzRange("start_time", "end_time", RangeBoundary()),
+                        RangeOperators.OVERLAPS,
+                    ),
+                    ("room", RangeOperators.EQUAL),
+                ],
+                condition=Q(booking_status__in=["PENDING", "CONFIRMED"]),
+            ),
+        ]
 
     room = models.ForeignKey(
         Room,
@@ -102,9 +140,7 @@ class Booking(models.Model):
     start_time = models.DateTimeField()
     end_time = models.DateTimeField()
     created_at = models.DateTimeField(auto_now_add=True)
-    expires_at = models.DateTimeField(
-        default=lambda: timezone.now() + timedelta(minutes=10)
-    )
+    expires_at = models.DateTimeField(default=get_expiration_time)
 
     def __str__(self):
         return f"{self.room.name}: {self.start_time} - {self.end_time}"
